@@ -16,55 +16,115 @@
 
 package com.android.internal.util.wings;
 
+import static android.provider.Settings.Global.ZEN_MODE_OFF;
+import static android.provider.Settings.Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS;
+
 import android.Manifest;
 import android.app.ActivityManager;
+import android.app.ActivityThread;
 import android.app.AlertDialog;
 import android.app.IActivityManager;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.bluetooth.BluetoothAdapter;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Resources;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.res.Resources;
-import android.hardware.fingerprint.FingerprintManager;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraManager;
 import android.hardware.input.InputManager;
+import android.hardware.fingerprint.FingerprintManager;
+import android.database.ContentObserver;
+import android.hardware.SensorPrivacyManager;
+import android.media.AudioManager;
 import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
+import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.AsyncTask;
 import android.os.BatteryManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
-import android.os.SystemProperties;
+import android.os.RemoteException;
+import android.graphics.Color;
+import android.os.ServiceManager;
 import android.os.SystemClock;
+import android.os.UserHandle;
+import android.provider.Settings;
 import android.text.format.Time;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
+import android.util.DisplayMetrics;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
-import android.util.DisplayMetrics;
+import android.view.IWindowManager;
+import android.view.WindowManagerGlobal;
+import android.widget.Toast;
 
+import com.android.internal.notification.SystemNotificationChannels;
 import com.android.internal.R;
+import com.android.internal.statusbar.IStatusBarService;
+import com.android.internal.util.ArrayUtils;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
-public class WingsUtils {
+public class wingsUtils {
 
-	// Check if device is connected to Wi-Fi
-    public static boolean isWiFiConnected(Context context) {
-        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm == null) return false;
-
-        NetworkInfo wifi = cm.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
-        return wifi.isConnected();
+    public static boolean isChineseLanguage() {
+       return Resources.getSystem().getConfiguration().locale.getLanguage().startsWith(
+               Locale.CHINESE.getLanguage());
     }
 
-	// Returns today's passed time in Millisecond
+    public static int getBlendColorForPercent(int fullColor, int emptyColor, boolean reversed,
+                                        int percentage) {
+        float[] newColor = new float[3];
+        float[] empty = new float[3];
+        float[] full = new float[3];
+        Color.colorToHSV(fullColor, full);
+        int fullAlpha = Color.alpha(fullColor);
+        Color.colorToHSV(emptyColor, empty);
+        int emptyAlpha = Color.alpha(emptyColor);
+        float blendFactor = percentage/100f;
+        if (reversed) {
+            if (empty[0] < full[0]) {
+                empty[0] += 360f;
+            }
+            newColor[0] = empty[0] - (empty[0]-full[0])*blendFactor;
+        } else {
+            if (empty[0] > full[0]) {
+                full[0] += 360f;
+            }
+            newColor[0] = empty[0] + (full[0]-empty[0])*blendFactor;
+        }
+        if (newColor[0] > 360f) {
+            newColor[0] -= 360f;
+        } else if (newColor[0] < 0) {
+            newColor[0] += 360f;
+        }
+        newColor[1] = empty[1] + ((full[1]-empty[1])*blendFactor);
+        newColor[2] = empty[2] + ((full[2]-empty[2])*blendFactor);
+        int newAlpha = (int) (emptyAlpha + ((fullAlpha-emptyAlpha)*blendFactor));
+        return Color.HSVToColor(newAlpha, newColor);
+    }
+
+    // Returns today's passed time in Millisecond
     public static long getTodayMillis() {
         final long passedMillis;
         Time time = new Time();
@@ -73,14 +133,40 @@ public class WingsUtils {
         return passedMillis;
     }
 
-	// Check if device is connected to the internet
-    public static boolean isConnected(Context context) {
-        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-        if (cm == null) return false;
+    public static boolean isAppInstalled(Context context, String appUri) {
+        try {
+            PackageManager pm = context.getPackageManager();
+            pm.getPackageInfo(appUri, PackageManager.GET_ACTIVITIES);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
-        NetworkInfo wifi = cm.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
-        NetworkInfo mobile = cm.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
-        return wifi.isConnected() || mobile.isConnected();
+    public static boolean isAvailableApp(String packageName, Context context) {
+       Context mContext = context;
+       final PackageManager pm = mContext.getPackageManager();
+       try {
+           pm.getPackageInfo(packageName, PackageManager.GET_ACTIVITIES);
+           int enabled = pm.getApplicationEnabledSetting(packageName);
+           return enabled != PackageManager.COMPONENT_ENABLED_STATE_DISABLED &&
+               enabled != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER;
+       } catch (NameNotFoundException e) {
+           return false;
+       }
+    }
+
+
+    public static boolean isPackageAvailable(Context context, String packageName) {
+        final PackageManager pm = context.getPackageManager();
+        try {
+            pm.getPackageInfo(packageName, PackageManager.GET_ACTIVITIES);
+            int enabled = pm.getApplicationEnabledSetting(packageName);
+            return enabled != PackageManager.COMPONENT_ENABLED_STATE_DISABLED &&
+                enabled != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER;
+        } catch (NameNotFoundException e) {
+            return false;
+        }
     }
 
     public static String batteryTemperature(Context context, Boolean ForC) {
@@ -112,15 +198,54 @@ public class WingsUtils {
                 networkOperator.substring(0, /*Filter only 3 digits*/ 3));
     }
 
-    // Check to see if a package is installed
-    public static boolean isPackageInstalled(Context context, String pkg, boolean ignoreState) {
-        if (pkg != null) {
+    public static boolean isPackageInstalled(Context context, String packageName, boolean ignoreState) {
+        if (packageName != null) {
             try {
-                PackageInfo pi = context.getPackageManager().getPackageInfo(pkg, 0);
+                PackageInfo pi = context.getPackageManager().getPackageInfo(packageName, 0);
                 if (!pi.applicationInfo.enabled && !ignoreState) {
                     return false;
                 }
-            } catch (NameNotFoundException e) {
+            } catch (PackageManager.NameNotFoundException e) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static boolean isPackageInstalled(Context context, String packageName) {
+        return isPackageInstalled(context, packageName, true);
+    }
+
+    public static boolean deviceSupportsFlashLight(Context context) {
+        CameraManager cameraManager = (CameraManager) context.getSystemService(
+                Context.CAMERA_SERVICE);
+        try {
+            String[] ids = cameraManager.getCameraIdList();
+            for (String id : ids) {
+                CameraCharacteristics c = cameraManager.getCameraCharacteristics(id);
+                Boolean flashAvailable = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
+                Integer lensFacing = c.get(CameraCharacteristics.LENS_FACING);
+                if (flashAvailable != null
+                        && flashAvailable
+                        && lensFacing != null
+                        && lensFacing == CameraCharacteristics.LENS_FACING_BACK) {
+                    return true;
+                }
+            }
+        } catch (CameraAccessException e) {
+            // Ignore
+        }
+        return false;
+    }
+
+    public static boolean isWifiOnly(Context context) {
+        ConnectivityManager cm = (ConnectivityManager)context.getSystemService(
+                Context.CONNECTIVITY_SERVICE);
+        Network[] networks = cm.getAllNetworks();
+
+        for (Network network : networks) {
+            NetworkCapabilities netCaps = cm.getNetworkCapabilities(network);
+            if (netCaps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
                 return false;
             }
         }
@@ -128,8 +253,32 @@ public class WingsUtils {
         return true;
     }
 
-    public static boolean isPackageInstalled(Context context, String pkg) {
-        return isPackageInstalled(context, pkg, true);
+    // Check to see if Wifi is connected
+    public static boolean isWifiConnected(Context context) {
+        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo activeNetwork = null;
+        if (cm != null) {
+            activeNetwork = cm.getActiveNetworkInfo();
+        }
+        NetworkInfo wifi = null;
+        if (cm != null) {
+            wifi = cm.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
+        }
+        return activeNetwork != null && activeNetwork.isConnectedOrConnecting() && wifi.isConnected();
+    }
+
+    // Check to see if Mobile data is connected
+    public static boolean isMobileConnected(Context context) {
+        ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo activeNetwork = null;
+        if (cm != null) {
+            activeNetwork = cm.getActiveNetworkInfo();
+        }
+        NetworkInfo mobile = null;
+        if (cm != null) {
+            mobile = cm.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
+        }
+        return activeNetwork != null && activeNetwork.isConnectedOrConnecting() && mobile.isConnected();
     }
 
     // Check to see if device supports the Fingerprint scanner
@@ -171,23 +320,12 @@ public class WingsUtils {
         return context.getResources().getBoolean(com.android.internal.R.bool.config_alt_ambient_display);
     }
 
-    // Check to see if device supports A/B (seamless) system updates
-    public static boolean isABdevice(Context context) {
-        return SystemProperties.getBoolean("ro.build.ab_update", false);
+    public static boolean deviceHasFlashlight(Context ctx) {
+        return ctx.getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_FLASH);
     }
 
-    // Check for Chinese language
-    public static boolean isChineseLanguage() {
-       return Resources.getSystem().getConfiguration().locale.getLanguage().startsWith(
-               Locale.CHINESE.getLanguage());
-    }
-
-    // Method to turn off the screen
-    public static void switchScreenOff(Context ctx) {
-        PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
-        if (pm!= null) {
-            pm.goToSleep(SystemClock.uptimeMillis());
-        }
+    public static void toggleCameraFlash() {
+        FireActions.toggleCameraFlash();
     }
 
     public static void sendKeycode(int keycode) {
@@ -215,6 +353,34 @@ public class WingsUtils {
         }, 20);
     }
 
+    /**
+     * Keep FireAction methods below this point.
+     * Place calls to methods above this point.
+     */
+    private static final class FireActions {
+        private static IStatusBarService mStatusBarService = null;
+        private static IStatusBarService getStatusBarService() {
+            synchronized (FireActions.class) {
+                if (mStatusBarService == null) {
+                    mStatusBarService = IStatusBarService.Stub.asInterface(
+                            ServiceManager.getService("statusbar"));
+                }
+                return mStatusBarService;
+            }
+        }
+
+        public static void toggleCameraFlash() {
+            IStatusBarService service = getStatusBarService();
+            if (service != null) {
+                try {
+                    service.toggleCameraFlash();
+                } catch (RemoteException e) {
+                    // do nothing.
+                }
+            }
+        }
+    }
+
     // Check if device has a notch
     public static boolean hasNotch(Context context) {
         String displayCutout = context.getResources().getString(R.string.config_mainBuiltInDisplayCutout);
@@ -223,6 +389,22 @@ public class WingsUtils {
         return displayCutoutExists;
     }
 
+    /**
+     * Returns whether the device is voice-capable (meaning, it is also a phone).
+     */
+    public static boolean isVoiceCapable(Context context) {
+        TelephonyManager telephony =
+                (TelephonyManager) context.getSystemService(Context.TELEPHONY_SERVICE);
+        return telephony != null && telephony.isVoiceCapable();
+    }
+
+    // Method to turn off the screen
+    public static void switchScreenOff(Context ctx) {
+        PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+        if (pm!= null) {
+            pm.goToSleep(SystemClock.uptimeMillis());
+        }
+    }
 
     public static void restartSystemUi(Context context) {
         new RestartSystemUiTask(context).execute();
@@ -265,6 +447,352 @@ public class WingsUtils {
                 e.printStackTrace();
             }
             return null;
+        }
+    }
+
+       public static class SleepModeController {
+        private final Resources mResources;
+        private final Context mUiContext;
+
+        private Context mContext;
+        private AudioManager mAudioManager;
+        private NotificationManager mNotificationManager;
+        private WifiManager mWifiManager;
+        private SensorPrivacyManager mSensorPrivacyManager;
+        private BluetoothAdapter mBluetoothAdapter;
+        private int mSubscriptionId;
+        private Toast mToast;
+
+        private boolean mSleepModeEnabled;
+
+        private static boolean mWifiState;
+        private static boolean mCellularState;
+        private static boolean mBluetoothState;
+        private static boolean mSensorState;
+        private static int mRingerState;
+        private static int mZenState;
+
+        private static final String TAG = "SleepModeController";
+        private static final int SLEEP_NOTIFICATION_ID = 727;
+        public static final String SLEEP_MODE_TURN_OFF = "android.intent.action.SLEEP_MODE_TURN_OFF";
+
+        public SleepModeController(Context context) {
+            mContext = context;
+            mUiContext = ActivityThread.currentActivityThread().getSystemUiContext();
+            mAudioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
+            mNotificationManager = (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE);
+            mWifiManager = (WifiManager) mContext.getSystemService(Context.WIFI_SERVICE);
+            mSensorPrivacyManager = (SensorPrivacyManager) mContext.getSystemService(Context.SENSOR_PRIVACY_SERVICE);
+            mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+            mSubscriptionId = SubscriptionManager.INVALID_SUBSCRIPTION_ID;
+            mResources = mContext.getResources();
+
+            mSleepModeEnabled = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_ENABLED, 0, UserHandle.USER_CURRENT) == 1;
+
+            SettingsObserver observer = new SettingsObserver(new Handler(Looper.getMainLooper()));
+            observer.observe();
+            observer.update();
+        }
+
+        private TelephonyManager getTelephonyManager() {
+            int subscriptionId = mSubscriptionId;
+
+            // If mSubscriptionId is invalid, get default data sub.
+            if (!SubscriptionManager.isValidSubscriptionId(subscriptionId)) {
+                subscriptionId = SubscriptionManager.getDefaultDataSubscriptionId();
+            }
+
+            // If data sub is also invalid, get any active sub.
+            if (!SubscriptionManager.isValidSubscriptionId(subscriptionId)) {
+                int[] activeSubIds = SubscriptionManager.from(mContext).getActiveSubscriptionIdList();
+                if (!ArrayUtils.isEmpty(activeSubIds)) {
+                    subscriptionId = activeSubIds[0];
+                }
+            }
+
+            return mContext.getSystemService(
+                    TelephonyManager.class).createForSubscriptionId(subscriptionId);
+        }
+
+        private boolean isWifiEnabled() {
+            if (mWifiManager == null) {
+                mWifiManager = (WifiManager) mContext.getSystemService(Context.WIFI_SERVICE);
+            }
+            try {
+                return mWifiManager.isWifiEnabled();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        private void setWifiEnabled(boolean enable) {
+            if (mWifiManager == null) {
+                mWifiManager = (WifiManager) mContext.getSystemService(Context.WIFI_SERVICE);
+            }
+            try {
+                mWifiManager.setWifiEnabled(enable);
+            } catch (Exception e) {
+            }
+        }
+
+        private boolean isBluetoothEnabled() {
+            if (mBluetoothAdapter == null) {
+                mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+            }
+            try {
+                return mBluetoothAdapter.isEnabled();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        private void setBluetoothEnabled(boolean enable) {
+            if (mBluetoothAdapter == null) {
+                mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+            }
+            try {
+                if (enable) mBluetoothAdapter.enable();
+                else mBluetoothAdapter.disable();
+            } catch (Exception e) {
+            }
+        }
+
+        private boolean isSensorEnabled() {
+            if (mSensorPrivacyManager == null) {
+                mSensorPrivacyManager = (SensorPrivacyManager) mContext.getSystemService(Context.SENSOR_PRIVACY_SERVICE);
+            }
+            try {
+                return !mSensorPrivacyManager.isAllSensorPrivacyEnabled();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        private void setSensorEnabled(boolean enable) {
+            if (mSensorPrivacyManager == null) {
+                mSensorPrivacyManager = (SensorPrivacyManager) mContext.getSystemService(Context.SENSOR_PRIVACY_SERVICE);
+            }
+            try {
+                mSensorPrivacyManager.setAllSensorPrivacy(!enable);
+            } catch (Exception e) {
+            }
+        }
+
+        private int getZenMode() {
+            if (mNotificationManager == null) {
+                mNotificationManager = (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE);
+            }
+            try {
+                return mNotificationManager.getZenMode();
+            } catch (Exception e) {
+                return -1;
+            }
+        }
+
+        private void setZenMode(int mode) {
+            if (mNotificationManager == null) {
+                mNotificationManager = (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE);
+            }
+            try {
+                mNotificationManager.setZenMode(mode, null, TAG);
+            } catch (Exception e) {
+            }
+        }
+
+        private int getRingerModeInternal() {
+            if (mAudioManager == null) {
+                mAudioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
+            }
+            try {
+                return mAudioManager.getRingerModeInternal();
+            } catch (Exception e) {
+                return -1;
+            }
+        }
+
+        private void setRingerModeInternal(int mode) {
+            if (mAudioManager == null) {
+                mAudioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
+            }
+            try {
+                mAudioManager.setRingerModeInternal(mode);
+            } catch (Exception e) {
+            }
+        }
+
+        private void enable() {
+            if (!ActivityManager.isSystemReady()) return;
+
+            // Disable Wi-Fi
+            final boolean disableWifi = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_WIFI_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableWifi) {
+                mWifiState = isWifiEnabled();
+                setWifiEnabled(false);
+            }
+
+            // Disable Bluetooth
+            final boolean disableBluetooth = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_BLUETOOTH_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableBluetooth) {
+                mBluetoothState = isBluetoothEnabled();
+                setBluetoothEnabled(false);
+            }
+
+            // Disable Mobile Data
+            final boolean disableData = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_CELLULAR_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableData) {
+                mCellularState = getTelephonyManager().isDataEnabled();
+                getTelephonyManager().setDataEnabled(false);
+            }
+
+            // Disable Sensors
+            final boolean disableSensors = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_SENSORS_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableSensors) {
+                mSensorState = isSensorEnabled();
+                setSensorEnabled(false);
+            }
+
+            // Set Ringer mode (0: Off, 1: Vibrate, 2:DND: 3:Silent)
+            final int ringerMode = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_RINGER_MODE, 0, UserHandle.USER_CURRENT);
+            if (ringerMode != 0) {
+                mRingerState = getRingerModeInternal();
+                mZenState = getZenMode();
+                if (ringerMode == 1) {
+                    setRingerModeInternal(AudioManager.RINGER_MODE_VIBRATE);
+                    setZenMode(ZEN_MODE_OFF);
+                } else if (ringerMode == 2) {
+                    setRingerModeInternal(AudioManager.RINGER_MODE_NORMAL);
+                    setZenMode(ZEN_MODE_IMPORTANT_INTERRUPTIONS);
+                } else if (ringerMode == 3) {
+                    setRingerModeInternal(AudioManager.RINGER_MODE_SILENT);
+                    setZenMode(ZEN_MODE_OFF);
+                }
+            }
+
+            showToast(mResources.getString(R.string.sleep_mode_enabled_toast), Toast.LENGTH_LONG);
+            addNotification();
+        }
+
+        private void disable() {
+            if (!ActivityManager.isSystemReady()) return;
+
+            // Enable Wi-Fi
+            final boolean disableWifi = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_WIFI_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableWifi && mWifiState != isWifiEnabled()) {
+                setWifiEnabled(mWifiState);
+            }
+
+            // Enable Bluetooth
+            final boolean disableBluetooth = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_BLUETOOTH_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableBluetooth && mBluetoothState != isBluetoothEnabled()) {
+                setBluetoothEnabled(mBluetoothState);
+            }
+
+            // Enable Mobile Data
+            final boolean disableData = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_CELLULAR_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableData && mCellularState != getTelephonyManager().isDataEnabled()) {
+                getTelephonyManager().setDataEnabled(mCellularState);
+            }
+
+            // Enable Sensors
+            final boolean disableSensors = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_SENSORS_TOGGLE, 1, UserHandle.USER_CURRENT) == 1;
+            if (disableSensors && mSensorState != isSensorEnabled()) {
+                setSensorEnabled(mSensorState);
+            }
+
+            // Set Ringer mode (0: Off, 1: Vibrate, 2:DND: 3:Silent)
+            final int ringerMode = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                    Settings.Secure.SLEEP_MODE_RINGER_MODE, 0, UserHandle.USER_CURRENT);
+            if (ringerMode != 0 && (mRingerState != getRingerModeInternal() ||
+                    mZenState != getZenMode())) {
+                setRingerModeInternal(mRingerState);
+                setZenMode(mZenState);
+            }
+
+            showToast(mResources.getString(R.string.sleep_mode_disabled_toast), Toast.LENGTH_LONG);
+            mNotificationManager.cancel(SLEEP_NOTIFICATION_ID);
+        }
+
+        private void addNotification() {
+            Intent intent = new Intent(SLEEP_MODE_TURN_OFF);
+            intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND | Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND);
+            PendingIntent pendingIntent = PendingIntent.getBroadcast(mContext, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+            // Display a notification
+            Notification.Builder builder = new Notification.Builder(mContext, SystemNotificationChannels.SLEEP)
+                .setTicker(mResources.getString(R.string.sleep_mode_notification_title))
+                .setContentTitle(mResources.getString(R.string.sleep_mode_notification_title))
+                .setContentText(mResources.getString(R.string.sleep_mode_notification_content))
+                .setSmallIcon(R.drawable.ic_sleep)
+                .setWhen(java.lang.System.currentTimeMillis())
+                .setOngoing(true)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(false);
+
+            Notification notification = builder.build();
+            mNotificationManager.notify(SLEEP_NOTIFICATION_ID, notification);
+        }
+
+        private void showToast(String msg, int duration) {
+            Handler handler = new Handler(Looper.getMainLooper());
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (mToast != null) mToast.cancel();
+                        mToast = Toast.makeText(mUiContext, msg, duration);
+                        mToast.show();
+                    } catch (Exception e) {
+                    }
+                }
+            });
+        }
+
+        private void setSleepMode(boolean enabled) {
+            if (mSleepModeEnabled == enabled) {
+                return;
+            }
+
+            mSleepModeEnabled = enabled;
+
+            if (mSleepModeEnabled) {
+                enable();
+            } else {
+                disable();
+            }
+        }
+
+        class SettingsObserver extends ContentObserver {
+            SettingsObserver(Handler handler) {
+                super(handler);
+            }
+
+            void observe() {
+                ContentResolver resolver = mContext.getContentResolver();
+                resolver.registerContentObserver(Settings.Secure.getUriFor(
+                        Settings.Secure.SLEEP_MODE_ENABLED), false, this,
+                        UserHandle.USER_ALL);
+            }
+
+            @Override
+            public void onChange(boolean selfChange, Uri uri) {
+                update();
+            }
+
+            void update() {
+                final boolean enabled = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                        Settings.Secure.SLEEP_MODE_ENABLED, 0, UserHandle.USER_CURRENT) == 1;
+                setSleepMode(enabled);
+            }
         }
     }
 }
