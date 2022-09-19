@@ -16,4 +16,6 @@
 -->
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
 
+     <!-- Footer bg -->
+     <color name="footer_actions_bg">@android:color/system_neutral1_50</color>
 </resources>
