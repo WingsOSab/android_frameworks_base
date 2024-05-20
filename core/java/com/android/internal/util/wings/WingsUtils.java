@@ -53,7 +53,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
-public class wingsUtils {
+public class WingsUtils {
 
 	// Check if device is connected to Wi-Fi
     public static boolean isWiFiConnected(Context context) {
